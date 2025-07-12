@@ -1,0 +1,11 @@
+node_modules/
+dist/
+bin/servexy-binary
+bin/servexy.exe
+*.log
+.DS_Store
+Thumbs.db
+
+# Development files - keep private
+PUBLISH.md
+scripts/build.js

@@ -1,0 +1,55 @@
+{
+	"name": "servexy",
+	"version": "1.0.0",
+	"description": "🚀 Servexy - The Fastest HTTP File Server. Lightning-fast HTTP server for serving files and directories with zero configuration.",
+	"main": "index.js",
+	"bin": {
+		"servexy": "./bin/servexy"
+	},
+	"scripts": {
+		"postinstall": "node scripts/install.js"
+	},
+	"keywords": [
+		"http-server",
+		"file-server",
+		"static-server",
+		"fastest",
+		"lightning-fast",
+		"zero-config",
+		"development",
+		"cli",
+		"go",
+		"binary",
+		"serve",
+		"static",
+		"local-server"
+	],
+	"author": "Rahat Sagor",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/rahatsagor/servexy.git"
+	},
+	"homepage": "https://servexy.rsapplication.com",
+	"bugs": {
+		"url": "https://github.com/rahatsagor/servexy/issues"
+	},
+	"engines": {
+		"node": ">=14.0.0"
+	},
+	"os": [
+		"darwin",
+		"linux",
+		"win32"
+	],
+	"cpu": [
+		"x64",
+		"arm64"
+	],
+	"files": [
+		"bin/servexy",
+		"scripts/install.js",
+		"index.js",
+		"README.md"
+	]
+}
