@@ -1,20 +1,21 @@
 {
 	"name": "servexy",
-	"version": "1.0.0",
-	"description": "🚀 Servexy - The Fastest HTTP File Server. Lightning-fast HTTP server for serving files and directories with zero configuration.",
-	"main": "index.js",
+	"version": "1.1.0",
+	"description": "Fast zero-config static file server with optional SPA history fallback.",
 	"bin": {
 		"servexy": "./bin/servexy"
 	},
 	"scripts": {
-		"postinstall": "node scripts/install.js"
+		"build": "bun run build:binaries",
+		"build:binaries": "bun scripts/build-binaries.js",
+		"build:current": "bun scripts/build-binaries.js --current",
+		"test": "go test ./...",
+		"prepack": "bun scripts/verify-package.js"
 	},
 	"keywords": [
 		"http-server",
 		"file-server",
 		"static-server",
-		"fastest",
-		"lightning-fast",
 		"zero-config",
 		"development",
 		"cli",
@@ -22,7 +23,12 @@
 		"binary",
 		"serve",
 		"static",
-		"local-server"
+		"local-server",
+		"spa",
+		"vue",
+		"vite",
+		"react",
+		"history-fallback"
 	],
 	"author": "Rahat Sagor",
 	"license": "MIT",
@@ -30,12 +36,16 @@
 		"type": "git",
 		"url": "https://github.com/rahatsagor/servexy.git"
 	},
-	"homepage": "https://servexy.rsapplication.com",
+	"homepage": "https://github.com/rahatsagor/servexy#readme",
 	"bugs": {
 		"url": "https://github.com/rahatsagor/servexy/issues"
 	},
+	"publishConfig": {
+		"access": "public"
+	},
+	"packageManager": "bun@1.3.14",
 	"engines": {
-		"node": ">=14.0.0"
+		"node": ">=18.0.0"
 	},
 	"os": [
 		"darwin",
@@ -48,8 +58,8 @@
 	],
 	"files": [
 		"bin/servexy",
-		"scripts/install.js",
-		"index.js",
-		"README.md"
+		"dist/servexy-*",
+		"README.md",
+		"LICENSE"
 	]
 }

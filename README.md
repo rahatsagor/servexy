@@ -1,30 +1,27 @@
-# 🚀 Servexy - The Fastest HTTP File Server
+# servexy
 
-Lightning-fast HTTP server for serving files and directories with zero configuration. Built with Go and distributed via npm.
+Fast zero-config static file server with optional SPA history fallback. Built with Go and distributed through npm with prebuilt binaries.
 
 ## Installation
 
 ### Global Installation
 
 ```bash
-# Using npm
-npm install -g servexy
-
 # Using bun
 bun install -g servexy
 
-# Using yarn
-yarn global add servexy
+# Using npm
+npm install -g servexy
 ```
 
-### Run without Installing (npx/bunx)
+### Run without Installing
 
 ```bash
-# Using npx
-npx servexy -p 8080
-
 # Using bunx
 bunx servexy -p 8080
+
+# Using npx
+npx servexy -p 8080
 ```
 
 ## Usage
@@ -38,6 +35,7 @@ servexy [OPTIONS]
 - `-p, -port <port>` - Port to serve on (default: 8080)
 - `-d, -dir <directory>` - Directory to serve (default: current directory)
 - `-n, -network` - Allow access from other devices on the network
+- `-s, -spa` - Serve `index.html` for missing HTML routes
 - `-h, -help` - Show help message
 
 ### Examples
@@ -55,6 +53,9 @@ servexy -d /home/user/docs
 # Serve with custom port and directory
 servexy -p 9000 -d ./public
 
+# Serve a Vue/Vite build with history routing fallback
+servexy -d ./dist -s
+
 # Allow network access from other devices
 servexy -n
 
@@ -67,16 +68,17 @@ servexy -h
 
 ## Features
 
-- ⚡ **Lightning Fast**: Built with Go for unmatched performance
-- 📁 **Simple**: Serve any directory with a single command
-- 🌐 **Network Access**: Optional network access for sharing across devices
-- 🔧 **Cross-platform**: Works on Windows, macOS, and Linux
-- 📦 **Easy Installation**: Install via npm/bun package managers
-- ⚡ **No Dependencies**: Self-contained binary, no runtime dependencies
+- **Fast**: Built with Go and a small wrapper
+- **Simple**: Serve any directory with a single command
+- **SPA fallback**: Optional `index.html` fallback for Vue/React router history mode
+- **Network access**: Optional network access for sharing across devices
+- **Cross-platform**: Works on Windows, macOS, and Linux
+- **Install-script free**: npm packages ship prebuilt binaries instead of downloading at install time
+- **No runtime dependencies**: Self-contained binary, no runtime npm dependencies
 
 ## Platform Support
 
-Servexy supports the following platforms:
+servexy supports the following platforms:
 
 - **Windows**: x64, ARM64
 - **macOS**: x64 (Intel), ARM64 (Apple Silicon)
@@ -86,22 +88,35 @@ Servexy supports the following platforms:
 
 ### Building from Source
 
-If you have Go installed, you can build the project:
+This project uses bun for package scripts and Go for the server binary.
 
 ```bash
-# Clone the repository
 git clone https://github.com/rahatsagor/servexy.git
 cd servexy
 
-# Build for current platform
-go build -o servexy main.go
+bun run test
+bun run build:current
+bun run build:binaries
 ```
 
-For maintainers: See development documentation for release processes.
+`bun run build:current` writes the binary for your current machine. `bun run build:binaries` writes every release binary to `dist/`. The npm package verifies those binaries during packing and never downloads or builds anything during user install.
+
+## Publishing
+
+Before publishing, rebuild every release binary from the current source:
+
+```bash
+bun run test
+bun run build:binaries
+bun publish --dry-run
+bun publish --access public
+```
+
+If cross-compiling fails on your local machine, run the build and publish steps on a Linux CI runner with Go 1.26.4 and Bun installed. Do not publish while `bun publish --dry-run` reports missing or stale binaries.
 
 ## License
 
-MIT License - see LICENSE file for details.
+MIT License - see [LICENSE](LICENSE) for details.
 
 ## Contributing
 

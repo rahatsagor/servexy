@@ -3,9 +3,10 @@ dist/
 bin/servexy-binary
 bin/servexy.exe
 *.log
+*.tgz
+.cache/
 .DS_Store
 Thumbs.db
 
-# Development files - keep private
 PUBLISH.md
 scripts/build.js

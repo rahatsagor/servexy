@@ -5,13 +5,31 @@ const path = require('path');
 const fs = require('fs');
 
 function getBinaryPath() {
-  const platform = process.platform;
-  const binaryName = platform === 'win32' ? 'servexy.exe' : 'servexy-binary';
-  const binaryPath = path.join(__dirname, binaryName);
+  const platformMap = {
+    darwin: 'darwin',
+    linux: 'linux',
+    win32: 'windows'
+  };
+  const archMap = {
+    x64: 'amd64',
+    arm64: 'arm64'
+  };
+
+  const osName = platformMap[process.platform];
+  const archName = archMap[process.arch];
+
+  if (!osName || !archName) {
+    console.error(`Unsupported platform: ${process.platform}/${process.arch}`);
+    process.exit(1);
+  }
+
+  const extension = osName === 'windows' ? '.exe' : '';
+  const binaryName = `servexy-${osName}-${archName}${extension}`;
+  const binaryPath = path.join(__dirname, '..', 'dist', binaryName);
   
   if (!fs.existsSync(binaryPath)) {
-    console.error('❌ Servexy binary not found. Please reinstall the package.');
-    console.error('Run: npm uninstall -g servexy && npm install -g servexy');
+    console.error(`servexy binary not found: ${binaryName}`);
+    console.error('If you are running from source, run: bun run build:binaries');
     process.exit(1);
   }
   
@@ -28,7 +46,7 @@ function main() {
   });
   
   child.on('error', (error) => {
-    console.error('❌ Failed to start servexy:', error.message);
+    console.error('failed to start servexy:', error.message);
     process.exit(1);
   });
   
@@ -40,7 +58,6 @@ function main() {
     }
   });
   
-  // Handle Ctrl+C gracefully
   process.on('SIGINT', () => {
     child.kill('SIGINT');
   });
