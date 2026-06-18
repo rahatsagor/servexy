@@ -103,7 +103,22 @@ bun run build:binaries
 
 ## Publishing
 
-Before publishing, rebuild every release binary from the current source:
+Publishing is handled by GitHub Actions using npm trusted publishing. On npmjs.com, configure package `servexy` with this trusted publisher:
+
+- Publisher: GitHub Actions
+- Owner: `rahatsagor`
+- Repository: `servexy`
+- Workflow filename: `publish.yml`
+- Allowed action: `npm publish`
+
+Then create and push a version tag:
+
+```bash
+git tag v1.1.0
+git push origin v1.1.0
+```
+
+The workflow runs tests, rebuilds every release binary, verifies the package, and publishes to npm. To publish manually from a local machine, run:
 
 ```bash
 bun run test

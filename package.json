@@ -3,7 +3,7 @@
 	"version": "1.1.0",
 	"description": "Fast zero-config static file server with optional SPA history fallback.",
 	"bin": {
-		"servexy": "./bin/servexy"
+		"servexy": "bin/servexy"
 	},
 	"scripts": {
 		"build": "bun run build:binaries",
@@ -34,7 +34,7 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "https://github.com/rahatsagor/servexy.git"
+		"url": "git+https://github.com/rahatsagor/servexy.git"
 	},
 	"homepage": "https://github.com/rahatsagor/servexy#readme",
 	"bugs": {
