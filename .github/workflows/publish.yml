@@ -48,7 +48,7 @@ jobs:
         run: bun scripts/verify-package.js
 
       - name: Create GitHub release
-        uses: softprops/action-gh-release@v3.0.0
+        uses: softprops/action-gh-release@v3.0.2
         with:
           files: |
             dist/servexy-*
