@@ -1,12 +1,9 @@
 node_modules/
 dist/
-bin/servexy-binary
-bin/servexy.exe
 *.log
 *.tgz
 .cache/
+/servexy
+/coverage.out
 .DS_Store
 Thumbs.db
-
-PUBLISH.md
-scripts/build.js

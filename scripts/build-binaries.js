@@ -1,8 +1,24 @@
 #!/usr/bin/env bun
 
-const { mkdirSync } = require("fs");
-const { join } = require("path");
-const { spawnSync } = require("child_process");
+"use strict";
+
+const { createHash } = require("node:crypto");
+const {
+	chmodSync,
+	existsSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} = require("node:fs");
+const { join } = require("node:path");
+const { spawnSync } = require("node:child_process");
+
+const rootDirectory = join(__dirname, "..");
+const distDirectory = join(rootDirectory, "dist");
+const packageMetadata = JSON.parse(
+	readFileSync(join(rootDirectory, "package.json"), "utf8"),
+);
 
 const releasePlatforms = [
 	{ os: "linux", arch: "amd64" },
@@ -13,19 +29,20 @@ const releasePlatforms = [
 	{ os: "windows", arch: "arm64", extension: ".exe" },
 ];
 
-const platformMap = {
+const platformNames = {
 	darwin: "darwin",
 	linux: "linux",
 	win32: "windows",
 };
 
-const archMap = {
+const architectureNames = {
 	x64: "amd64",
 	arm64: "arm64",
 };
 
 function run(command, args, options = {}) {
 	const result = spawnSync(command, args, {
+		cwd: rootDirectory,
 		stdio: "inherit",
 		...options,
 	});
@@ -33,17 +50,14 @@ function run(command, args, options = {}) {
 	if (result.error) {
 		throw result.error;
 	}
-
 	if (result.status !== 0) {
 		throw new Error(`${command} ${args.join(" ")} exited with ${result.status}`);
 	}
 }
 
-const goBinary = process.env.GO_BINARY || "go";
-
 function currentPlatform() {
-	const os = platformMap[process.platform];
-	const arch = archMap[process.arch];
+	const os = platformNames[process.platform];
+	const arch = architectureNames[process.arch];
 
 	if (!os || !arch) {
 		throw new Error(`Unsupported platform: ${process.platform}/${process.arch}`);
@@ -56,27 +70,72 @@ function currentPlatform() {
 	};
 }
 
-const platforms = process.argv.includes("--current")
-	? [currentPlatform()]
-	: releasePlatforms;
+function binaryName(platform) {
+	return `servexy-${platform.os}-${platform.arch}${platform.extension || ""}`;
+}
 
-mkdirSync("dist", { recursive: true });
+function writeChecksums() {
+	const checksums = releasePlatforms.map((platform) => {
+		const name = binaryName(platform);
+		const contents = readFileSync(join(distDirectory, name));
+		const digest = createHash("sha256").update(contents).digest("hex");
+		return `${digest}  ${name}`;
+	});
 
+	writeFileSync(join(distDirectory, "SHA256SUMS"), `${checksums.join("\n")}\n`);
+}
+
+const currentOnly = process.argv.includes("--current");
+const platforms = currentOnly ? [currentPlatform()] : releasePlatforms;
+const goBinary = process.env.GO_BINARY || "go";
+const ldflags = `-s -w -buildid= -X main.version=${packageMetadata.version}`;
+
+mkdirSync(distDirectory, { recursive: true });
 run(goBinary, ["version"]);
 
+if (!currentOnly) {
+	for (const platform of releasePlatforms) {
+		const output = join(distDirectory, binaryName(platform));
+		if (existsSync(output)) {
+			rmSync(output);
+		}
+	}
+	if (existsSync(join(distDirectory, "SHA256SUMS"))) {
+		rmSync(join(distDirectory, "SHA256SUMS"));
+	}
+}
+
 for (const platform of platforms) {
-	const output = join(
-		"dist",
-		`servexy-${platform.os}-${platform.arch}${platform.extension || ""}`,
+	const name = binaryName(platform);
+	const output = join(distDirectory, name);
+
+	console.log(`Building ${platform.os}/${platform.arch} -> dist/${name}`);
+	run(
+		goBinary,
+		[
+			"build",
+			"-buildvcs=false",
+			"-trimpath",
+			`-ldflags=${ldflags}`,
+			"-o",
+			output,
+			".",
+		],
+		{
+			env: {
+				...process.env,
+				CGO_ENABLED: "0",
+				GOOS: platform.os,
+				GOARCH: platform.arch,
+			},
+		},
 	);
 
-	console.log(`Building ${platform.os}/${platform.arch} -> ${output}`);
-	run(goBinary, ["build", "-trimpath", "-ldflags=-s -w", "-o", output, "."], {
-		env: {
-			...process.env,
-			CGO_ENABLED: "0",
-			GOOS: platform.os,
-			GOARCH: platform.arch,
-		},
-	});
+	if (platform.os !== "windows") {
+		chmodSync(output, 0o755);
+	}
+}
+
+if (!currentOnly) {
+	writeChecksums();
 }

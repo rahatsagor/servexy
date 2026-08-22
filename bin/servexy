@@ -1,72 +1,95 @@
 #!/usr/bin/env node
 
-const { spawn } = require('child_process');
-const path = require('path');
-const fs = require('fs');
+"use strict";
+
+const { existsSync } = require("node:fs");
+const { join } = require("node:path");
+const { spawn } = require("node:child_process");
+
+const platformNames = {
+	darwin: "darwin",
+	linux: "linux",
+	win32: "windows",
+};
+
+const architectureNames = {
+	x64: "amd64",
+	arm64: "arm64",
+};
+
+const signalExitCodes = {
+	SIGHUP: 129,
+	SIGINT: 130,
+	SIGTERM: 143,
+};
+
+function fail(message) {
+	console.error(`servexy: ${message}`);
+	process.exitCode = 1;
+}
 
 function getBinaryPath() {
-  const platformMap = {
-    darwin: 'darwin',
-    linux: 'linux',
-    win32: 'windows'
-  };
-  const archMap = {
-    x64: 'amd64',
-    arm64: 'arm64'
-  };
+	const platform = platformNames[process.platform];
+	const architecture = architectureNames[process.arch];
 
-  const osName = platformMap[process.platform];
-  const archName = archMap[process.arch];
+	if (!platform || !architecture) {
+		throw new Error(`unsupported platform: ${process.platform}/${process.arch}`);
+	}
 
-  if (!osName || !archName) {
-    console.error(`Unsupported platform: ${process.platform}/${process.arch}`);
-    process.exit(1);
-  }
+	const extension = platform === "windows" ? ".exe" : "";
+	const binaryName = `servexy-${platform}-${architecture}${extension}`;
+	const binaryPath = join(__dirname, "..", "dist", binaryName);
 
-  const extension = osName === 'windows' ? '.exe' : '';
-  const binaryName = `servexy-${osName}-${archName}${extension}`;
-  const binaryPath = path.join(__dirname, '..', 'dist', binaryName);
-  
-  if (!fs.existsSync(binaryPath)) {
-    console.error(`servexy binary not found: ${binaryName}`);
-    console.error('If you are running from source, run: bun run build:binaries');
-    process.exit(1);
-  }
-  
-  return binaryPath;
+	if (!existsSync(binaryPath)) {
+		throw new Error(
+			`binary not found: ${binaryName}. Reinstall the package or run 'bun run build:binaries' from source.`,
+		);
+	}
+
+	return binaryPath;
 }
 
 function main() {
-  const binaryPath = getBinaryPath();
-  const args = process.argv.slice(2);
-  
-  const child = spawn(binaryPath, args, {
-    stdio: 'inherit',
-    windowsHide: false
-  });
-  
-  child.on('error', (error) => {
-    console.error('failed to start servexy:', error.message);
-    process.exit(1);
-  });
-  
-  child.on('exit', (code, signal) => {
-    if (signal) {
-      process.kill(process.pid, signal);
-    } else {
-      process.exit(code || 0);
-    }
-  });
-  
-  process.on('SIGINT', () => {
-    child.kill('SIGINT');
-  });
-  
-  process.on('SIGTERM', () => {
-    child.kill('SIGTERM');
-  });
+	let binaryPath;
+	try {
+		binaryPath = getBinaryPath();
+	} catch (error) {
+		fail(error.message);
+		return;
+	}
+
+	const child = spawn(binaryPath, process.argv.slice(2), {
+		stdio: "inherit",
+		windowsHide: true,
+	});
+
+	const forwardedSignals = Object.keys(signalExitCodes);
+	const signalHandlers = new Map();
+	for (const signal of forwardedSignals) {
+		const handler = () => {
+			if (child.exitCode === null && child.signalCode === null) {
+				child.kill(signal);
+			}
+		};
+		signalHandlers.set(signal, handler);
+		process.once(signal, handler);
+	}
+
+	const removeSignalHandlers = () => {
+		for (const [signal, handler] of signalHandlers) {
+			process.removeListener(signal, handler);
+		}
+	};
+
+	child.once("error", (error) => {
+		removeSignalHandlers();
+		fail(`failed to start native binary: ${error.message}`);
+	});
+
+	child.once("exit", (code, signal) => {
+		removeSignalHandlers();
+		process.exitCode = signal ? signalExitCodes[signal] || 1 : code ?? 1;
+	});
 }
 
-if (require.main === module) {
-  main();
-}
+main();
