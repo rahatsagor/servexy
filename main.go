@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"mime"
 	"net"
@@ -32,28 +33,49 @@ const (
 var version = "dev"
 
 type cliOptions struct {
-	port          string
-	dir           string
-	network       bool
+	port    string
+	dir     string
+	network bool
+	help    bool
+	version bool
+	handler handlerOptions
+}
+
+type handlerOptions struct {
 	spa           bool
 	compress      bool
+	dotfiles      bool
 	cacheDuration time.Duration
-	help          bool
-	version       bool
 }
 
 type staticHandler struct {
-	fileServer    http.Handler
-	fileSystem    http.FileSystem
-	spa           bool
-	compress      bool
-	cacheDuration time.Duration
+	fileServer        http.Handler
+	fileSystem        http.FileSystem
+	spa               bool
+	compress          bool
+	dotfiles          bool
+	assetCacheControl string
 }
 
 type gzipResponseWriter struct {
 	http.ResponseWriter
 	compressor  *gzip.Writer
 	wroteHeader bool
+}
+
+// rootFileSystem serves files through an os.Root so that symlinks and
+// relative paths can never resolve outside the served directory. Regular
+// files are returned as *os.File, which keeps the sendfile fast path.
+type rootFileSystem struct {
+	root *os.Root
+}
+
+type dotfileHidingFileSystem struct {
+	http.FileSystem
+}
+
+type dotfileHidingDirectory struct {
+	http.File
 }
 
 var gzipWriterPool = sync.Pool{
@@ -66,16 +88,93 @@ var gzipWriterPool = sync.Pool{
 	},
 }
 
-func newStaticHandler(dir string, spa bool, compress bool, cacheDuration time.Duration) http.Handler {
-	fileSystem := http.Dir(dir)
+func newStaticHandler(root *os.Root, options handlerOptions) http.Handler {
+	var fileSystem http.FileSystem = rootFileSystem{root: root}
+	if !options.dotfiles {
+		fileSystem = dotfileHidingFileSystem{FileSystem: fileSystem}
+	}
+
+	assetCacheControl := "no-cache"
+	if options.cacheDuration > 0 {
+		maxAge := int64(options.cacheDuration / time.Second)
+		assetCacheControl = "public, max-age=" + strconv.FormatInt(maxAge, 10)
+	}
 
 	return &staticHandler{
-		fileServer:    http.FileServer(fileSystem),
-		fileSystem:    fileSystem,
-		spa:           spa,
-		compress:      compress,
-		cacheDuration: cacheDuration,
+		fileServer:        http.FileServer(fileSystem),
+		fileSystem:        fileSystem,
+		spa:               options.spa,
+		compress:          options.compress,
+		dotfiles:          options.dotfiles,
+		assetCacheControl: assetCacheControl,
 	}
+}
+
+func (fsys rootFileSystem) Open(name string) (http.File, error) {
+	if filepath.Separator != '/' && strings.ContainsRune(name, filepath.Separator) {
+		return nil, fs.ErrNotExist
+	}
+
+	relative := strings.TrimPrefix(path.Clean("/"+name), "/")
+	if relative == "" {
+		relative = "."
+	}
+
+	file, err := fsys.root.Open(filepath.FromSlash(relative))
+	if err != nil {
+		// os.Root reports paths that escape the root with an unexported error,
+		// which http.FileServer would turn into a 500. Report them as missing.
+		if !errors.Is(err, fs.ErrPermission) && !errors.Is(err, fs.ErrNotExist) {
+			err = fmt.Errorf("%w: %w", fs.ErrNotExist, err)
+		}
+		return nil, err
+	}
+	return file, nil
+}
+
+func (fsys dotfileHidingFileSystem) Open(name string) (http.File, error) {
+	if hasHiddenSegment(name) {
+		return nil, fs.ErrNotExist
+	}
+
+	file, err := fsys.FileSystem.Open(name)
+	if err != nil {
+		return nil, err
+	}
+
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, err
+	}
+	if info.IsDir() {
+		return dotfileHidingDirectory{File: file}, nil
+	}
+	return file, nil
+}
+
+func (d dotfileHidingDirectory) Readdir(count int) ([]fs.FileInfo, error) {
+	entries, err := d.File.Readdir(count)
+	visible := entries[:0]
+	for _, entry := range entries {
+		if !isHiddenName(entry.Name()) {
+			visible = append(visible, entry)
+		}
+	}
+	return visible, err
+}
+
+func hasHiddenSegment(name string) bool {
+	for _, segment := range strings.Split(name, "/") {
+		if isHiddenName(segment) {
+			return true
+		}
+	}
+	return false
+}
+
+func isHiddenName(name string) bool {
+	return strings.HasPrefix(name, ".") && name != "." && name != ".." && name != ".well-known"
 }
 
 func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +183,11 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if !h.dotfiles && hasHiddenSegment(r.URL.Path) {
+		http.NotFound(w, r)
 		return
 	}
 
@@ -145,13 +249,11 @@ func (h *staticHandler) setCacheHeader(w http.ResponseWriter, requestPath string
 	extension := strings.ToLower(path.Ext(requestPath))
 	isHTML := extension == "" || extension == ".html" || extension == ".htm"
 
-	if fallback || isHTML || h.cacheDuration <= 0 {
+	if fallback || isHTML {
 		w.Header().Set("Cache-Control", "no-cache")
 		return
 	}
-
-	maxAge := int64(h.cacheDuration / time.Second)
-	w.Header().Set("Cache-Control", fmt.Sprintf("public, max-age=%d", maxAge))
+	w.Header().Set("Cache-Control", h.assetCacheControl)
 }
 
 func isNavigationRequest(r *http.Request) bool {
@@ -247,6 +349,8 @@ func (w *gzipResponseWriter) WriteHeader(statusCode int) {
 
 	if shouldCompressResponse(w.Header(), statusCode) {
 		w.Header().Del("Content-Length")
+		// Byte ranges cannot be served against a dynamically compressed body.
+		w.Header().Del("Accept-Ranges")
 		w.Header().Set("Content-Encoding", "gzip")
 		addVaryHeader(w.Header(), "Accept-Encoding")
 
@@ -265,6 +369,22 @@ func (w *gzipResponseWriter) Write(contents []byte) (int, error) {
 		return w.compressor.Write(contents)
 	}
 	return w.ResponseWriter.Write(contents)
+}
+
+// ReadFrom lets uncompressed responses (images, video, small files) reach the
+// underlying connection's ReadFrom, which uses sendfile for *os.File sources.
+func (w *gzipResponseWriter) ReadFrom(src io.Reader) (int64, error) {
+	if !w.wroteHeader {
+		w.WriteHeader(http.StatusOK)
+	}
+	if w.compressor != nil {
+		return io.Copy(w.compressor, src)
+	}
+	return io.Copy(w.ResponseWriter, src)
+}
+
+func (w *gzipResponseWriter) Unwrap() http.ResponseWriter {
+	return w.ResponseWriter
 }
 
 func (w *gzipResponseWriter) close() {
@@ -325,9 +445,9 @@ func addVaryHeader(header http.Header, value string) {
 
 func parseOptions(args []string) (cliOptions, error) {
 	options := cliOptions{
-		port:     defaultPort,
-		dir:      ".",
-		compress: true,
+		port:    defaultPort,
+		dir:     ".",
+		handler: handlerOptions{compress: true},
 	}
 
 	var positional []string
@@ -389,24 +509,30 @@ func parseOptions(args []string) (cliOptions, error) {
 			if err := rejectValue(); err != nil {
 				return options, err
 			}
-			options.spa = true
+			options.handler.spa = true
 		case "--no-compress":
 			if err := rejectValue(); err != nil {
 				return options, err
 			}
-			options.compress = false
+			options.handler.compress = false
+		case "--dotfiles":
+			if err := rejectValue(); err != nil {
+				return options, err
+			}
+			options.handler.dotfiles = true
 		case "--cache":
 			value, err := takeValue()
 			if err != nil {
 				return options, err
 			}
-			options.cacheDuration, err = time.ParseDuration(value)
-			if err != nil || options.cacheDuration < 0 {
+			duration, err := time.ParseDuration(value)
+			if err != nil || duration < 0 {
 				return options, fmt.Errorf("invalid cache duration %q (examples: 0, 10m, 1h)", value)
 			}
-			if options.cacheDuration > 0 && options.cacheDuration < time.Second {
+			if duration > 0 && duration < time.Second {
 				return options, errors.New("cache duration must be zero or at least one second")
 			}
+			options.handler.cacheDuration = duration
 		case "-h", "--help", "-help":
 			if err := rejectValue(); err != nil {
 				return options, err
@@ -435,9 +561,11 @@ func parseOptions(args []string) (cliOptions, error) {
 		options.dir = positional[0]
 	}
 
-	if err := validatePort(options.port); err != nil {
+	port, err := parsePort(options.port)
+	if err != nil {
 		return options, fmt.Errorf("invalid port: %w", err)
 	}
+	options.port = strconv.Itoa(port)
 
 	return options, nil
 }
@@ -455,6 +583,7 @@ OPTIONS:
   -s, --spa               Fall back to index.html for SPA navigation routes
       --cache <duration>  Cache non-HTML files (examples: 10m, 1h, 24h)
       --no-compress       Disable gzip compression
+      --dotfiles          Serve dotfiles such as .env (hidden by default)
   -v, --version           Show the installed version
   -h, --help              Show this help message
 
@@ -468,34 +597,52 @@ EXAMPLES:
 Options may appear before or after DIRECTORY.`
 }
 
+// getLocalIP returns an IPv4 address other devices can likely reach, preferring
+// private LAN addresses over other routable ones and skipping link-local ones.
 func getLocalIP() string {
-	addresses, err := net.InterfaceAddrs()
+	interfaces, err := net.Interfaces()
 	if err != nil {
 		return ""
 	}
-	for _, address := range addresses {
-		ipNetwork, ok := address.(*net.IPNet)
-		if ok && !ipNetwork.IP.IsLoopback() && ipNetwork.IP.To4() != nil {
-			return ipNetwork.IP.String()
+
+	fallback := ""
+	for _, networkInterface := range interfaces {
+		if networkInterface.Flags&net.FlagUp == 0 || networkInterface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addresses, err := networkInterface.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, address := range addresses {
+			ipNetwork, ok := address.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipNetwork.IP.To4()
+			if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+				continue
+			}
+			if ip.IsPrivate() {
+				return ip.String()
+			}
+			if fallback == "" {
+				fallback = ip.String()
+			}
 		}
 	}
-	return ""
+	return fallback
 }
 
-func validatePort(port string) error {
+func parsePort(port string) (int, error) {
 	value, err := strconv.Atoi(port)
 	if err != nil {
-		return fmt.Errorf("port must be a number: %s", port)
+		return 0, fmt.Errorf("port must be a number: %s", port)
 	}
 	if value < 1 || value > 65535 {
-		return errors.New("port must be between 1 and 65535")
+		return 0, errors.New("port must be between 1 and 65535")
 	}
-	return nil
-}
-
-func fileExists(filePath string) bool {
-	info, err := os.Stat(filePath)
-	return err == nil && info.Mode().IsRegular()
+	return value, nil
 }
 
 func run(args []string) error {
@@ -524,14 +671,28 @@ func run(args []string) error {
 	if !fileInfo.IsDir() {
 		return fmt.Errorf("path is not a directory: %s", serveDir)
 	}
-	if options.spa && !fileExists(filepath.Join(serveDir, "index.html")) {
-		return fmt.Errorf("SPA mode requires index.html in: %s", serveDir)
+
+	root, err := os.OpenRoot(serveDir)
+	if err != nil {
+		return fmt.Errorf("open directory: %w", err)
+	}
+	defer root.Close()
+
+	if options.handler.spa {
+		info, err := root.Stat("index.html")
+		if err != nil || !info.Mode().IsRegular() {
+			return fmt.Errorf("SPA mode requires index.html in: %s", serveDir)
+		}
 	}
 
+	// An empty host listens on every interface, including IPv6.
 	host := "127.0.0.1"
 	if options.network {
-		host = "0.0.0.0"
+		host = ""
 	}
+
+	signalContext, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
 
 	listener, err := net.Listen("tcp", net.JoinHostPort(host, options.port))
 	if err != nil {
@@ -540,14 +701,17 @@ func run(args []string) error {
 
 	fmt.Printf("servexy %s\n", version)
 	fmt.Printf("serving %s\n", serveDir)
-	if options.spa {
+	if options.handler.spa {
 		fmt.Println("SPA fallback enabled")
 	}
-	if options.compress {
+	if options.handler.compress {
 		fmt.Println("gzip compression enabled")
 	}
-	if options.cacheDuration > 0 {
-		fmt.Printf("asset cache enabled: %s\n", options.cacheDuration)
+	if options.handler.cacheDuration > 0 {
+		fmt.Printf("asset cache enabled: %s\n", options.handler.cacheDuration)
+	}
+	if options.handler.dotfiles {
+		fmt.Println("dotfiles are served")
 	}
 
 	if options.network {
@@ -561,7 +725,7 @@ func run(args []string) error {
 	fmt.Println("press Ctrl+C to stop")
 
 	server := &http.Server{
-		Handler:           newStaticHandler(serveDir, options.spa, options.compress, options.cacheDuration),
+		Handler:           newStaticHandler(root, options.handler),
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
 		MaxHeaderBytes:    1 << 20,
@@ -573,9 +737,6 @@ func run(args []string) error {
 		serverErrors <- server.Serve(listener)
 	}()
 
-	signalContext, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stopSignals()
-
 	select {
 	case err := <-serverErrors:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -583,6 +744,8 @@ func run(args []string) error {
 		}
 		return nil
 	case <-signalContext.Done():
+		// Restore default signal handling so a second Ctrl+C exits immediately.
+		stopSignals()
 		fmt.Println("\nshutting down")
 	}
 

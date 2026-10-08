@@ -13,32 +13,13 @@ const {
 } = require("node:fs");
 const { join } = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { releasePlatforms, binaryName, currentPlatform } = require("./platforms.js");
 
 const rootDirectory = join(__dirname, "..");
 const distDirectory = join(rootDirectory, "dist");
 const packageMetadata = JSON.parse(
 	readFileSync(join(rootDirectory, "package.json"), "utf8"),
 );
-
-const releasePlatforms = [
-	{ os: "linux", arch: "amd64" },
-	{ os: "linux", arch: "arm64" },
-	{ os: "darwin", arch: "amd64" },
-	{ os: "darwin", arch: "arm64" },
-	{ os: "windows", arch: "amd64", extension: ".exe" },
-	{ os: "windows", arch: "arm64", extension: ".exe" },
-];
-
-const platformNames = {
-	darwin: "darwin",
-	linux: "linux",
-	win32: "windows",
-};
-
-const architectureNames = {
-	x64: "amd64",
-	arm64: "arm64",
-};
 
 function run(command, args, options = {}) {
 	const result = spawnSync(command, args, {
@@ -53,25 +34,6 @@ function run(command, args, options = {}) {
 	if (result.status !== 0) {
 		throw new Error(`${command} ${args.join(" ")} exited with ${result.status}`);
 	}
-}
-
-function currentPlatform() {
-	const os = platformNames[process.platform];
-	const arch = architectureNames[process.arch];
-
-	if (!os || !arch) {
-		throw new Error(`Unsupported platform: ${process.platform}/${process.arch}`);
-	}
-
-	return {
-		os,
-		arch,
-		extension: os === "windows" ? ".exe" : "",
-	};
-}
-
-function binaryName(platform) {
-	return `servexy-${platform.os}-${platform.arch}${platform.extension || ""}`;
 }
 
 function writeChecksums() {

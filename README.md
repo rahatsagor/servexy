@@ -31,6 +31,7 @@ OPTIONS:
   -s, --spa               Fall back to index.html for SPA navigation routes
       --cache <duration>  Cache non-HTML files (examples: 10m, 1h, 24h)
       --no-compress       Disable gzip compression
+      --dotfiles          Serve dotfiles such as .env (hidden by default)
   -v, --version           Show the installed version
   -h, --help              Show help
 ```
@@ -44,7 +45,12 @@ servexy --network ./public
 servexy ./dist --spa --cache 1h
 ```
 
-The server listens only on `127.0.0.1` by default. Use `--network` only when the files should be reachable by other devices.
+The server listens only on `127.0.0.1` by default. Use `--network` only when the files should be reachable by other devices; it listens on all available network interfaces, including IPv6 where supported.
+
+## Security
+
+- Files are served through an `os.Root`, which rejects paths and symlinks that escape the served directory. Relative symlinks that stay inside it work normally; absolute symlinks are rejected.
+- Paths containing dotfiles or dot-directories (`.env`, `.git/`, `.htpasswd`, ...) return `404`, including in SPA mode, and hidden names are excluded from directory listings. `.well-known` directories are allowed; hidden files inside them remain blocked. Pass `--dotfiles` to serve hidden paths.
 
 ## Vue and Other SPAs
 
@@ -67,18 +73,19 @@ For Vue Router, history mode works with `--spa`. Hash mode does not need fallbac
 ## Production Behavior
 
 - Gzip compression is enabled for compressible responses larger than 1 KiB.
-- Range requests are never dynamically compressed.
+- Range requests are never dynamically compressed, and compressed responses do not advertise range support.
+- Uncompressed files (images, video, archives) retain Go's zero-copy `sendfile` path where supported.
 - HTML and SPA fallback responses use `Cache-Control: no-cache`.
 - `--cache 1h` applies a public max-age to non-HTML assets.
 - `X-Content-Type-Options: nosniff` is included on responses.
-- The server uses bounded header and idle timeouts and shuts down cleanly on termination.
+- The server uses bounded header and idle timeouts and shuts down cleanly on termination. A second Ctrl+C exits immediately.
 - Only `GET` and `HEAD` are accepted.
 
 servexy supports Linux, macOS, and Windows on x64 and ARM64.
 
 ## Development
 
-Requirements: Go 1.27 and Bun 1.4.
+Requirements: Go 1.27.1, Bun 1.4.2, and Node.js 18 or newer for npm launcher tests.
 
 ```bash
 git clone https://github.com/rahatsagor/servexy.git
@@ -86,8 +93,10 @@ cd servexy
 
 bun run check
 bun run test:race
+bun run vuln
 bun run build:current
 bun run verify:current
+bun run test:launcher
 ```
 
 Build every release binary and verify the package:
@@ -95,7 +104,7 @@ Build every release binary and verify the package:
 ```bash
 bun run build:binaries
 bun scripts/verify-package.js
-npm publish --dry-run --access public
+bun publish --dry-run --access public
 ```
 
 Full builds produce `dist/SHA256SUMS`. Package verification checks every binary's version, executable mode, size, and checksum before npm can pack or publish it.
@@ -111,11 +120,11 @@ GitHub Actions publishes npm and GitHub releases from version tags using npm tru
 Update `package.json`, commit the release, then push the matching tag:
 
 ```bash
-git tag v1.2.0
-git push origin main v1.2.0
+git tag v1.3.0
+git push origin main v1.3.0
 ```
 
-CI tests Linux, macOS, and Windows. The release workflow tests and vets the source, rebuilds all six binaries, verifies checksums and tag/version alignment, creates the GitHub release, and publishes to npm with provenance.
+CI tests Linux, macOS, and Windows and runs `govulncheck`. All workflow actions are pinned to commit SHAs. The release workflow tests, vets, and scans the source, rebuilds all six binaries, verifies checksums and tag/version alignment, creates the GitHub release, and publishes to npm with provenance.
 
 ## License
 

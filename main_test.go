@@ -24,6 +24,17 @@ func writeFile(t *testing.T, dir string, name string, contents string) {
 	}
 }
 
+func newTestHandler(t *testing.T, dir string, options handlerOptions) http.Handler {
+	t.Helper()
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("failed to open root: %v", err)
+	}
+	t.Cleanup(func() { root.Close() })
+	return newStaticHandler(root, options)
+}
+
 func serveRequest(handler http.Handler, method string, target string, headers map[string]string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(method, target, nil)
 	for name, value := range headers {
@@ -40,7 +51,7 @@ func TestStaticHandlerServesExistingFiles(t *testing.T) {
 	writeFile(t, dir, "app.js", "console.log('ok')")
 
 	response := serveRequest(
-		newStaticHandler(dir, true, false, 0),
+		newTestHandler(t, dir, handlerOptions{spa: true}),
 		http.MethodGet,
 		"/app.js",
 		nil,
@@ -61,7 +72,7 @@ func TestStaticHandlerSPAFallbackNavigation(t *testing.T) {
 	writeFile(t, dir, "docs/index.html", "<main>docs</main>")
 	writeFile(t, dir, "empty/.keep", "fixture")
 
-	handler := newStaticHandler(dir, true, false, 0)
+	handler := newTestHandler(t, dir, handlerOptions{spa: true})
 	tests := []struct {
 		name    string
 		target  string
@@ -138,7 +149,7 @@ func TestStaticHandlerSPAFallbackNavigation(t *testing.T) {
 func TestStaticHandlerSPAFallbackDoesNotMaskNonNavigationRequests(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "index.html", "<main id=\"app\"></main>")
-	handler := newStaticHandler(dir, true, false, 0)
+	handler := newTestHandler(t, dir, handlerOptions{spa: true})
 
 	tests := []struct {
 		name   string
@@ -167,7 +178,7 @@ func TestStaticHandlerWithoutSPAFallbackReturns404(t *testing.T) {
 	writeFile(t, dir, "index.html", "<main id=\"app\"></main>")
 
 	response := serveRequest(
-		newStaticHandler(dir, false, false, 0),
+		newTestHandler(t, dir, handlerOptions{}),
 		http.MethodGet,
 		"/dashboard/settings",
 		map[string]string{"Accept": "text/html"},
@@ -183,7 +194,7 @@ func TestStaticHandlerSPAFallbackSupportsHead(t *testing.T) {
 	writeFile(t, dir, "index.html", "<main id=\"app\"></main>")
 
 	response := serveRequest(
-		newStaticHandler(dir, true, true, 0),
+		newTestHandler(t, dir, handlerOptions{spa: true, compress: true}),
 		http.MethodHead,
 		"/dashboard",
 		map[string]string{"Accept": "text/html", "Accept-Encoding": "gzip"},
@@ -204,7 +215,7 @@ func TestStaticHandlerRejectsUnsupportedMethods(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "index.html", "ok")
 
-	response := serveRequest(newStaticHandler(dir, false, false, 0), http.MethodPost, "/", nil)
+	response := serveRequest(newTestHandler(t, dir, handlerOptions{}), http.MethodPost, "/", nil)
 	if response.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", response.Code)
 	}
@@ -219,7 +230,7 @@ func TestStaticHandlerCompressesLargeTextResponses(t *testing.T) {
 	writeFile(t, dir, "assets/app.js", contents)
 
 	response := serveRequest(
-		newStaticHandler(dir, false, true, 0),
+		newTestHandler(t, dir, handlerOptions{compress: true}),
 		http.MethodGet,
 		"/assets/app.js",
 		map[string]string{"Accept-Encoding": "br, gzip;q=1"},
@@ -255,7 +266,7 @@ func TestStaticHandlerRespectsCompressionOptOutAndRanges(t *testing.T) {
 	dir := t.TempDir()
 	contents := strings.Repeat("servexy", 500)
 	writeFile(t, dir, "asset.txt", contents)
-	handler := newStaticHandler(dir, false, true, 0)
+	handler := newTestHandler(t, dir, handlerOptions{compress: true})
 
 	t.Run("gzip rejected", func(t *testing.T) {
 		response := serveRequest(handler, http.MethodGet, "/asset.txt", map[string]string{"Accept-Encoding": "gzip;q=0, *;q=1"})
@@ -288,7 +299,7 @@ func TestStaticHandlerCachePolicy(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "index.html", "<main>app</main>")
 	writeFile(t, dir, "assets/app.js", "console.log('ok')")
-	handler := newStaticHandler(dir, true, false, time.Hour)
+	handler := newTestHandler(t, dir, handlerOptions{spa: true, cacheDuration: time.Hour})
 
 	asset := serveRequest(handler, http.MethodGet, "/assets/app.js", nil)
 	if asset.Header().Get("Cache-Control") != "public, max-age=3600" {
@@ -312,10 +323,10 @@ func TestParseOptionsSupportsFlagsAnywhere(t *testing.T) {
 		t.Fatalf("parseOptions returned an error: %v", err)
 	}
 
-	if options.dir != "./dist" || options.port != "3000" || !options.spa || !options.network {
+	if options.dir != "./dist" || options.port != "3000" || !options.handler.spa || !options.network {
 		t.Fatalf("unexpected options: %+v", options)
 	}
-	if !options.compress || options.cacheDuration != time.Hour {
+	if !options.handler.compress || options.handler.cacheDuration != time.Hour || options.handler.dotfiles {
 		t.Fatalf("unexpected production options: %+v", options)
 	}
 }
@@ -325,8 +336,21 @@ func TestParseOptionsPreservesLegacyAliases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseOptions returned an error: %v", err)
 	}
-	if options.dir != "./public" || options.port != "9000" || !options.spa || !options.network || options.compress {
+	if options.dir != "./public" || options.port != "9000" || !options.handler.spa || !options.network || options.handler.compress {
 		t.Fatalf("unexpected options: %+v", options)
+	}
+}
+
+func TestParseOptionsDotfilesAndPortNormalization(t *testing.T) {
+	options, err := parseOptions([]string{"--dotfiles", "--port", "+08080"})
+	if err != nil {
+		t.Fatalf("parseOptions returned an error: %v", err)
+	}
+	if !options.handler.dotfiles {
+		t.Fatalf("expected dotfiles to be enabled")
+	}
+	if options.port != "8080" {
+		t.Fatalf("expected normalized port 8080, got %q", options.port)
 	}
 }
 
@@ -340,6 +364,7 @@ func TestParseOptionsRejectsInvalidInput(t *testing.T) {
 		{"--dir", "public", "dist"},
 		{"public", "dist"},
 		{"--spa=true"},
+		{"--dotfiles=1"},
 	}
 
 	for _, args := range tests {
@@ -349,14 +374,127 @@ func TestParseOptionsRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-func TestValidatePort(t *testing.T) {
-	if err := validatePort("8080"); err != nil {
-		t.Fatalf("expected valid port: %v", err)
+func TestParsePort(t *testing.T) {
+	if port, err := parsePort("8080"); err != nil || port != 8080 {
+		t.Fatalf("expected valid port 8080, got %d (%v)", port, err)
 	}
 
-	for _, port := range []string{"0", "65536", "abc"} {
-		if err := validatePort(port); err == nil {
+	for _, port := range []string{"0", "65536", "abc", "-1", ""} {
+		if _, err := parsePort(port); err == nil {
 			t.Fatalf("expected invalid port %q", port)
 		}
+	}
+}
+
+func TestStaticHandlerHidesDotfiles(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "index.html", "<main>app</main>")
+	writeFile(t, dir, ".env", "SECRET=1")
+	writeFile(t, dir, ".git/config", "[core]")
+	writeFile(t, dir, "public/.htpasswd", "user:hash")
+	writeFile(t, dir, "public/visible.txt", "visible")
+	writeFile(t, dir, ".well-known/security.txt", "Contact: mailto:security@example.com")
+	writeFile(t, dir, ".well-known/.secret", "SECRET=2")
+
+	handler := newTestHandler(t, dir, handlerOptions{})
+	targets := []string{"/.env", "/%2eenv", "/.git/config", "/.git/", "/public/.htpasswd", "/.well-known/.secret"}
+	for _, target := range targets {
+		response := serveRequest(handler, http.MethodGet, target, nil)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("expected 404 for %s, got %d", target, response.Code)
+		}
+	}
+
+	wellKnown := serveRequest(handler, http.MethodGet, "/.well-known/security.txt", nil)
+	if wellKnown.Code != http.StatusOK {
+		t.Fatalf("expected .well-known to be served, got %d", wellKnown.Code)
+	}
+
+	listing := serveRequest(handler, http.MethodGet, "/public/", nil)
+	if listing.Code != http.StatusOK {
+		t.Fatalf("expected directory listing, got %d", listing.Code)
+	}
+	if strings.Contains(listing.Body.String(), ".htpasswd") || !strings.Contains(listing.Body.String(), "visible.txt") {
+		t.Fatalf("directory listing should hide dotfiles: %q", listing.Body.String())
+	}
+
+	spa := newTestHandler(t, dir, handlerOptions{spa: true})
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		for _, target := range targets {
+			response := serveRequest(spa, method, target, map[string]string{"Sec-Fetch-Mode": "navigate", "Accept": "text/html"})
+			if response.Code != http.StatusNotFound || strings.Contains(response.Body.String(), "SECRET=") || strings.Contains(response.Body.String(), "<main>") {
+				t.Fatalf("expected hidden path to remain 404 in SPA mode for %s %s, got %d %q", method, target, response.Code, response.Body.String())
+			}
+		}
+	}
+
+	allowed := newTestHandler(t, dir, handlerOptions{dotfiles: true})
+	if response := serveRequest(allowed, http.MethodGet, "/.env", nil); response.Body.String() != "SECRET=1" {
+		t.Fatalf("expected --dotfiles to serve .env, got %d %q", response.Code, response.Body.String())
+	}
+}
+
+func TestStaticHandlerDoesNotFollowSymlinksOutsideRoot(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "site")
+	writeFile(t, parent, "secret.txt", "top secret")
+	writeFile(t, dir, "inside.txt", "inside")
+	if err := os.Symlink(filepath.Join(parent, "secret.txt"), filepath.Join(dir, "escape.txt")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink("inside.txt", filepath.Join(dir, "alias.txt")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	handler := newTestHandler(t, dir, handlerOptions{})
+
+	escape := serveRequest(handler, http.MethodGet, "/escape.txt", nil)
+	if escape.Code != http.StatusNotFound || strings.Contains(escape.Body.String(), "top secret") {
+		t.Fatalf("expected 404 for escaping symlink, got %d %q", escape.Code, escape.Body.String())
+	}
+
+	alias := serveRequest(handler, http.MethodGet, "/alias.txt", nil)
+	if alias.Code != http.StatusOK || alias.Body.String() != "inside" {
+		t.Fatalf("expected symlink inside root to be served, got %d %q", alias.Code, alias.Body.String())
+	}
+}
+
+func TestStaticHandlerCompressedResponseDropsRangeAdvertisement(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "app.css", strings.Repeat("body { color: red; }\n", 200))
+
+	response := serveRequest(newTestHandler(t, dir, handlerOptions{compress: true}), http.MethodGet, "/app.css", map[string]string{"Accept-Encoding": "gzip"})
+	if response.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("expected gzip encoding")
+	}
+	if response.Header().Get("Accept-Ranges") != "" || response.Header().Get("Content-Length") != "" {
+		t.Fatalf("compressed response must not advertise ranges or original length: %v", response.Header())
+	}
+}
+
+func TestStaticHandlerServesBinaryUncompressedThroughWrapper(t *testing.T) {
+	dir := t.TempDir()
+	contents := strings.Repeat("\x89PNG\x00\x01", 1000)
+	writeFile(t, dir, "image.png", contents)
+
+	response := serveRequest(newTestHandler(t, dir, handlerOptions{compress: true}), http.MethodGet, "/image.png", map[string]string{"Accept-Encoding": "gzip"})
+	if response.Code != http.StatusOK || response.Header().Get("Content-Encoding") != "" {
+		t.Fatalf("expected uncompressed 200, got %d %q", response.Code, response.Header().Get("Content-Encoding"))
+	}
+	if response.Body.String() != contents {
+		t.Fatalf("binary response body was altered")
+	}
+}
+
+func TestStaticHandlerMissingAssetIsNotCached(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "index.html", "<main>app</main>")
+
+	response := serveRequest(newTestHandler(t, dir, handlerOptions{cacheDuration: time.Hour}), http.MethodGet, "/assets/missing.js", nil)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", response.Code)
+	}
+	if cacheControl := response.Header().Get("Cache-Control"); strings.Contains(cacheControl, "max-age") {
+		t.Fatalf("404 responses must not be cached, got %q", cacheControl)
 	}
 }

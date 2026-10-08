@@ -22,17 +22,19 @@ jobs:
           - windows-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v7.0.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2.2.0
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.4.0'
+          bun-version: '1.4.2'
 
       - name: Test and vet
         run: bun run check
@@ -43,22 +45,30 @@ jobs:
       - name: Smoke-test current binary
         run: bun run verify:current
 
+      - name: Test npm launcher
+        run: bun run test:launcher
+
   race:
     name: Race detector
     runs-on: ubuntu-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v7.0.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
       - name: Set up Bun
-        uses: oven-sh/setup-bun@v2.2.0
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
-          bun-version: '1.4.0'
+          bun-version: '1.4.2'
 
       - name: Run race detector
         run: bun run test:race
+
+      - name: Scan for known vulnerabilities
+        run: bun run vuln

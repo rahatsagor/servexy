@@ -61,18 +61,26 @@ function main() {
 	const child = spawn(binaryPath, process.argv.slice(2), {
 		stdio: "inherit",
 		windowsHide: true,
+		// On Unix, only the launcher should receive terminal signals. It
+		// forwards each one once, allowing the child to shut down gracefully.
+		detached: process.platform !== "win32",
 	});
 
 	const forwardedSignals = Object.keys(signalExitCodes);
 	const signalHandlers = new Map();
 	for (const signal of forwardedSignals) {
 		const handler = () => {
+			// Windows delivers Ctrl+C to both console processes, and kill()
+			// would terminate the child immediately instead of notifying it.
+			if (process.platform === "win32" && signal === "SIGINT") {
+				return;
+			}
 			if (child.exitCode === null && child.signalCode === null) {
 				child.kill(signal);
 			}
 		};
 		signalHandlers.set(signal, handler);
-		process.once(signal, handler);
+		process.on(signal, handler);
 	}
 
 	const removeSignalHandlers = () => {
