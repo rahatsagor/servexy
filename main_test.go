@@ -2,11 +2,14 @@ package main
 
 import (
 	"compress/gzip"
+	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -171,6 +174,48 @@ func TestStaticHandlerSPAFallbackDoesNotMaskNonNavigationRequests(t *testing.T) 
 			}
 		})
 	}
+
+	browserSubresources := []struct {
+		name    string
+		target  string
+		headers map[string]string
+	}{
+		{
+			name:   "fetch to extensionless API route",
+			target: "/api/users",
+			headers: map[string]string{
+				"Accept":         "*/*",
+				"Sec-Fetch-Mode": "cors",
+				"Sec-Fetch-Dest": "empty",
+			},
+		},
+		{
+			name:   "image without extension",
+			target: "/avatars/jane",
+			headers: map[string]string{
+				"Accept":         "*/*",
+				"Sec-Fetch-Mode": "no-cors",
+				"Sec-Fetch-Dest": "image",
+			},
+		},
+		{
+			name:   "destination metadata only",
+			target: "/api/session",
+			headers: map[string]string{
+				"Accept":         "*/*",
+				"Sec-Fetch-Dest": "empty",
+			},
+		},
+	}
+
+	for _, test := range browserSubresources {
+		t.Run(test.name, func(t *testing.T) {
+			response := serveRequest(handler, http.MethodGet, test.target, test.headers)
+			if response.Code != http.StatusNotFound {
+				t.Fatalf("expected 404, got %d %q", response.Code, response.Body.String())
+			}
+		})
+	}
 }
 
 func TestStaticHandlerWithoutSPAFallbackReturns404(t *testing.T) {
@@ -276,6 +321,22 @@ func TestStaticHandlerRespectsCompressionOptOutAndRanges(t *testing.T) {
 		if response.Body.String() != contents {
 			t.Fatalf("expected original response body")
 		}
+		if !strings.Contains(response.Header().Get("Vary"), "Accept-Encoding") {
+			t.Fatalf("uncompressed variant of a compressible response must send Vary, got %q", response.Header().Get("Vary"))
+		}
+	})
+
+	t.Run("no Accept-Encoding", func(t *testing.T) {
+		response := serveRequest(handler, http.MethodGet, "/asset.txt", nil)
+		if response.Header().Get("Content-Encoding") != "" || response.Body.String() != contents {
+			t.Fatalf("expected an uncompressed response")
+		}
+		if response.Header().Get("Content-Length") == "" {
+			t.Fatalf("uncompressed response should keep Content-Length")
+		}
+		if !strings.Contains(response.Header().Get("Vary"), "Accept-Encoding") {
+			t.Fatalf("expected Vary: Accept-Encoding, got %q", response.Header().Get("Vary"))
+		}
 	})
 
 	t.Run("range request", func(t *testing.T) {
@@ -374,6 +435,36 @@ func TestParseOptionsRejectsInvalidInput(t *testing.T) {
 	}
 }
 
+func TestRunMarksOnlyUsageErrors(t *testing.T) {
+	if err := run([]string{"--unknown"}); !errors.As(err, new(usageError)) {
+		t.Fatalf("expected a usage error, got %v", err)
+	}
+
+	missing := filepath.Join(t.TempDir(), "missing")
+	if err := run([]string{missing}); err == nil || errors.As(err, new(usageError)) {
+		t.Fatalf("expected a non-usage error for a missing directory, got %v", err)
+	}
+}
+
+func TestDescribeListenErrorReportsPortInUse(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to reserve a port: %v", err)
+	}
+	defer listener.Close()
+
+	_, err = net.Listen("tcp", listener.Addr().String())
+	if err == nil {
+		t.Skip("platform allowed a second listener on the same port")
+	}
+
+	_, port, _ := net.SplitHostPort(listener.Addr().String())
+	message := describeListenError(err, port).Error()
+	if !strings.Contains(message, "port "+port+" is already in use") {
+		t.Fatalf("expected a friendly port-in-use message, got %q", message)
+	}
+}
+
 func TestParsePort(t *testing.T) {
 	if port, err := parsePort("8080"); err != nil || port != 8080 {
 		t.Fatalf("expected valid port 8080, got %d (%v)", port, err)
@@ -431,6 +522,36 @@ func TestStaticHandlerHidesDotfiles(t *testing.T) {
 	allowed := newTestHandler(t, dir, handlerOptions{dotfiles: true})
 	if response := serveRequest(allowed, http.MethodGet, "/.env", nil); response.Body.String() != "SECRET=1" {
 		t.Fatalf("expected --dotfiles to serve .env, got %d %q", response.Code, response.Body.String())
+	}
+}
+
+func TestLooksLikeShortName(t *testing.T) {
+	for _, name := range []string{"GIT~1", "ENV~1", "HTPASS~2", "git~10", "a~1.txt"} {
+		if !looksLikeShortName(name) {
+			t.Fatalf("expected %q to look like an 8.3 short name", name)
+		}
+	}
+	for _, name := range []string{"index.html", "~", "backup~", "notes~draft", "~user", "app.js"} {
+		if looksLikeShortName(name) {
+			t.Fatalf("expected %q not to look like an 8.3 short name", name)
+		}
+	}
+}
+
+func TestStaticHandlerHidesWindowsShortNameAliases(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("8.3 short names only exist on Windows")
+	}
+
+	dir := t.TempDir()
+	writeFile(t, dir, ".git/config", "[core]")
+	if _, err := os.Stat(filepath.Join(dir, "GIT~1", "config")); err != nil {
+		t.Skipf("8.3 short names are disabled on this volume: %v", err)
+	}
+
+	response := serveRequest(newTestHandler(t, dir, handlerOptions{}), http.MethodGet, "/GIT~1/config", nil)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for short-name alias, got %d %q", response.Code, response.Body.String())
 	}
 }
 

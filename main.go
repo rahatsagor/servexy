@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,6 +61,7 @@ type staticHandler struct {
 type gzipResponseWriter struct {
 	http.ResponseWriter
 	compressor  *gzip.Writer
+	clientGzip  bool
 	wroteHeader bool
 }
 
@@ -174,7 +176,21 @@ func hasHiddenSegment(name string) bool {
 }
 
 func isHiddenName(name string) bool {
-	return strings.HasPrefix(name, ".") && name != "." && name != ".." && name != ".well-known"
+	if strings.HasPrefix(name, ".") && name != "." && name != ".." && name != ".well-known" {
+		return true
+	}
+	return runtime.GOOS == "windows" && looksLikeShortName(name)
+}
+
+// looksLikeShortName reports whether name could be an NTFS 8.3 alias such as
+// GIT~1 or ENV~1, which Windows resolves to hidden entries like .git or .env.
+func looksLikeShortName(name string) bool {
+	for index := 0; index+1 < len(name); index++ {
+		if name[index] == '~' && name[index+1] >= '0' && name[index+1] <= '9' {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -201,8 +217,11 @@ func (h *staticHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	h.setCacheHeader(w, r.URL.Path, fallback)
 
-	if h.compress && request.Method == http.MethodGet && request.Header.Get("Range") == "" && acceptsGzip(request.Header.Get("Accept-Encoding")) {
-		compressed := &gzipResponseWriter{ResponseWriter: w}
+	if h.compress && request.Method == http.MethodGet && request.Header.Get("Range") == "" {
+		compressed := &gzipResponseWriter{
+			ResponseWriter: w,
+			clientGzip:     acceptsGzip(request.Header.Get("Accept-Encoding")),
+		}
 		h.fileServer.ServeHTTP(compressed, request)
 		compressed.close()
 		return
@@ -257,14 +276,19 @@ func (h *staticHandler) setCacheHeader(w http.ResponseWriter, requestPath string
 }
 
 func isNavigationRequest(r *http.Request) bool {
-	switch strings.ToLower(r.Header.Get("Sec-Fetch-Mode")) {
-	case "navigate":
-		return true
+	// Browsers that send Fetch Metadata state exactly what kind of request this
+	// is, so fetch(), images, and scripts never receive the SPA shell even when
+	// they accept */* and request an extensionless path.
+	if mode := r.Header.Get("Sec-Fetch-Mode"); mode != "" {
+		return strings.EqualFold(mode, "navigate")
 	}
-
-	switch strings.ToLower(r.Header.Get("Sec-Fetch-Dest")) {
-	case "document", "frame", "iframe":
-		return true
+	if destination := r.Header.Get("Sec-Fetch-Dest"); destination != "" {
+		switch strings.ToLower(destination) {
+		case "document", "frame", "iframe":
+			return true
+		default:
+			return false
+		}
 	}
 
 	accept := r.Header.Get("Accept")
@@ -347,12 +371,19 @@ func (w *gzipResponseWriter) WriteHeader(statusCode int) {
 	}
 	w.wroteHeader = true
 
-	if shouldCompressResponse(w.Header(), statusCode) {
+	if !shouldCompressResponse(w.Header(), statusCode) {
+		w.ResponseWriter.WriteHeader(statusCode)
+		return
+	}
+
+	// Every variant of a compressible response must carry Vary, otherwise a
+	// shared cache may store the identity body and serve it to gzip clients.
+	addVaryHeader(w.Header(), "Accept-Encoding")
+	if w.clientGzip {
 		w.Header().Del("Content-Length")
 		// Byte ranges cannot be served against a dynamically compressed body.
 		w.Header().Del("Accept-Ranges")
 		w.Header().Set("Content-Encoding", "gzip")
-		addVaryHeader(w.Header(), "Accept-Encoding")
 
 		w.compressor = gzipWriterPool.Get().(*gzip.Writer)
 		w.compressor.Reset(w.ResponseWriter)
@@ -645,10 +676,36 @@ func parsePort(port string) (int, error) {
 	return value, nil
 }
 
+// describeListenError turns the most common bind failures into actionable
+// messages. Windows reports Winsock codes that syscall.EADDRINUSE and
+// os.ErrPermission do not match, so those are checked explicitly.
+func describeListenError(err error, port string) error {
+	const (
+		wsaAccessDenied = syscall.Errno(10013)
+		wsaAddressInUse = syscall.Errno(10048)
+	)
+
+	switch {
+	case errors.Is(err, syscall.EADDRINUSE) || errors.Is(err, wsaAddressInUse):
+		return fmt.Errorf("port %s is already in use; stop the other server or choose another port with --port", port)
+	case errors.Is(err, os.ErrPermission) || errors.Is(err, wsaAccessDenied):
+		return fmt.Errorf("permission denied for port %s; choose a port above 1023 or one not reserved by the system", port)
+	default:
+		return fmt.Errorf("start server: %w", err)
+	}
+}
+
+type usageError struct {
+	err error
+}
+
+func (e usageError) Error() string { return e.err.Error() }
+func (e usageError) Unwrap() error { return e.err }
+
 func run(args []string) error {
 	options, err := parseOptions(args)
 	if err != nil {
-		return err
+		return usageError{err: err}
 	}
 	if options.help {
 		fmt.Println(usage())
@@ -696,7 +753,7 @@ func run(args []string) error {
 
 	listener, err := net.Listen("tcp", net.JoinHostPort(host, options.port))
 	if err != nil {
-		return fmt.Errorf("start server: %w", err)
+		return describeListenError(err, options.port)
 	}
 
 	fmt.Printf("servexy %s\n", version)
@@ -752,7 +809,11 @@ func run(args []string) error {
 	shutdownContext, cancelShutdown := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancelShutdown()
 	if err := server.Shutdown(shutdownContext); err != nil {
-		return fmt.Errorf("shut down server: %w", err)
+		if !errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("shut down server: %w", err)
+		}
+		fmt.Fprintf(os.Stderr, "servexy: requests still active after %s, closing connections\n", shutdownTimeout)
+		_ = server.Close()
 	}
 
 	if err := <-serverErrors; err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -764,7 +825,9 @@ func run(args []string) error {
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "servexy: %v\n", err)
-		fmt.Fprintln(os.Stderr, "Run 'servexy --help' for usage.")
+		if errors.As(err, new(usageError)) {
+			fmt.Fprintln(os.Stderr, "Run 'servexy --help' for usage.")
+		}
 		os.Exit(1)
 	}
 }
