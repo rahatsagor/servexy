@@ -1,6 +1,6 @@
 {
 	"name": "servexy",
-	"version": "1.3.0",
+	"version": "1.4.0",
 	"description": "Fast production-ready static file server with reliable SPA routing.",
 	"bin": {
 		"servexy": "bin/servexy"
