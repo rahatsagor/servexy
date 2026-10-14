@@ -473,7 +473,7 @@ Still stuck? [Open an issue](https://github.com/rahatsagor/servexy/issues/new) w
 
 ## Build from source
 
-You need [Go](https://go.dev/dl/) 1.27.1 or later, [Bun](https://bun.sh/) 1.4.2 or later, and Node.js 18 or later for the launcher tests.
+You need [Go](https://go.dev/dl/) 1.27.2 or later, [Bun](https://bun.sh/) 1.4.2 or later, and Node.js 18 or later for the launcher tests.
 
 ```bash
 git clone https://github.com/rahatsagor/servexy.git
